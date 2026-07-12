@@ -124,3 +124,8 @@ venv.bak/
 # pixi environments
 .pixi
 *.egg-info
+
+# generated image files
+advanced/backends/img_data/*.jpg
+advanced/backends/img_data/*.png
+advanced/backends/img_data/*.gif

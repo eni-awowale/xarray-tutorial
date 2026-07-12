@@ -8,6 +8,7 @@ import pandas as pd
 import xarray as xr
 import imageio.v3 as iio
 import matplotlib.pyplot as plt
+from enum import Enum
 
 if TYPE_CHECKING:
     import os
@@ -25,6 +26,12 @@ if TYPE_CHECKING:
 
     IndexerType = int | slice | npt.NDArray[np.integer]
     FilenameOrObjectType = str | os.PathLike | bytes | FileLike
+
+
+class GifWriterType(str, Enum):
+    IMAGEIO = "imageio"
+    PLOT = "matplotlib"
+
 
 
 @dataclass
@@ -47,13 +54,13 @@ class ImageIOBackendArray(xr.backends.BackendArray):
     def basic_indexing(self, key: tuple[IndexerType]) -> npt.NDArray:
         import imageio.v3 as iio
 
-        with self.lock, iio.imopen(self.filename_or_obj, io_mode='r') as f:
+        with self.lock, iio.imopen(self.filename_or_obj, io_mode="r") as f:
             if key == (slice(None),) * len(self.shape):
                 return f.read()
 
             first_indexer = key[0]
             if isinstance(first_indexer, int):
-                data = f.read(index=first_indexer, mode='P', writable=True)
+                data = f.read(index=first_indexer, mode="P", writable=True)
 
                 remaining_indexers = key[1:]
             else:
@@ -62,7 +69,9 @@ class ImageIOBackendArray(xr.backends.BackendArray):
                 else:
                     indices = first_indexer
 
-                data = np.concatenate([f.read(index=index, mode='P') for index in indices], axis=0)
+                data = np.concatenate(
+                    [f.read(index=index, mode="P") for index in indices], axis=0
+                )
 
                 remaining_indexers = (..., *key[1:])
 
@@ -75,28 +84,28 @@ class ImageIOBackend(xr.backends.BackendEntrypoint):
         filename_or_obj: FilenameOrObjectType,
         *,
         drop_variables: bool | None = None,
-        mode: Literal['grayscale', 'color'] = 'color',
+        mode: Literal["grayscale", "color"] = "color",
     ) -> xr.Dataset:
 
-        with iio.imopen(filename_or_obj, io_mode='r') as f:
+        with iio.imopen(filename_or_obj, io_mode="r") as f:
             properties = f.properties()
             metadata = f.metadata()
 
-            dims = ['time', 'height', 'width', 'color']
+            dims = ["time", "height", "width", "color"]
 
-            background = metadata['background']
-            duration = metadata['duration']
-            loop = metadata['loop']
+            background = metadata["background"]
+            duration = metadata["duration"]
+            loop = metadata["loop"]
 
             shape = properties.shape
             dtype = properties.dtype
 
         if isinstance(duration, (int, float)):
-            time_values = np.timedelta64(duration, 'ms') * np.arange(shape[0])
+            time_values = np.timedelta64(duration, "ms") * np.arange(shape[0])
         else:
-            time_values = np.array(duration, dtype='timedelta64[ms]')
+            time_values = np.array(duration, dtype="timedelta64[ms]")
 
-        time = xr.indexes.PandasIndex(pd.Index(time_values), dim='time')
+        time = xr.indexes.PandasIndex(pd.Index(time_values), dim="time")
 
         backend_array = ImageIOBackendArray(
             filename_or_obj=filename_or_obj,
@@ -109,73 +118,66 @@ class ImageIOBackend(xr.backends.BackendEntrypoint):
         var = xr.Variable(
             dims=dims,
             data=data,
-            attrs={'loop': loop},
+            attrs={"loop": loop},
             encoding={
-                'preferred_chunks': dict(zip(dims, (1, *shape[1:]))),
-                'fill_value': background,
+                "preferred_chunks": dict(zip(dims, (1, *shape[1:]))),
+                "fill_value": background,
             },
         )
-        coords = xr.Coordinates.from_xindex(time).assign(color=['red', 'green', 'blue'])
+        coords = xr.Coordinates.from_xindex(time).assign(color=["red", "green", "blue"])
 
-        return xr.Dataset({'data': var}, coords=coords)
+        return xr.Dataset({"data": var}, coords=coords)
 
-
-    def write_dataset_gif(
+    def to_gif(
         self,
         dataset: xr.Dataset,
         out_filename: str,
         variable: str,
         time_dim: str,
-        plot: bool = False,
-        plot_outpath: str ='plot_image',
-    ):       
+        plot_outpath: str,
+        method: GifWriterType = GifWriterType.IMAGEIO,
+        **kwargs,
+    ):
         """Writes a xr.Dataset to a GIF. xr.Dataset must have a time dimension greater than 1.
 
         :param dataset: xr.Dataset containing data variables
         :param out_filename: GIF filename to write out to.
         :param variable: data variable to plot and covert to GIF
         :param time_dim: name of time dimension
-        :param plot: when True, writes and plot image first as JPG and create GIF from plots, defaults to False
-        :param plot_outpath: name for plots appended with the index of the time series, defaults to 'plot_image'
+        :param plot_outpath: name for plots appended with the index of the time series
+        :param method: when GifWriterType.PLOT writes and plots images with `matplotlib` and creates a GIF from plots, defaults to GifWriterType.PLOT
         """
-        
-        if plot:
+
+        if method is GifWriterType.PLOT.value:
             img_count = len(dataset[time_dim])
-            jpg_names = []
+            img_names = []
             variable_da = dataset[variable]
             for i in range(img_count):
                 plt.figure()
                 variable_da[i].plot(
-                    x="lon",
-                    y="lat",
-                    vmin=variable_da.min(),
-                    vmax=variable_da.max())
-                jpg_name = f'img_data/{plot_outpath}_{i}.jpg'
-                plt.savefig(jpg_name)
-                jpg_names.append(jpg_name)
-            self.write_jpg_gif(jpg_names, out_filename)
-
-        else:
-            frames_array = np.stack(
-                [dataset[variable][x] for x in range(len(dataset[time_dim]))], axis=0
+                    x="lon", y="lat", vmin=variable_da.min(), vmax=variable_da.max(), **kwargs
                 )
-            iio.imwrite(
-                out_filename,
-                frames_array,
-                extension=".gif",
-                loop=0,
-                duration=100,
-                background=1,
+                jpg_name = f"{plot_outpath}_{i}.png"
+                plt.savefig(jpg_name)
+                img_names.append(jpg_name)
+            frames = np.stack([iio.imread(image) for image in img_names], axis=0)
+            self._to_gif(frames, out_filename)
+
+        elif method is GifWriterType.IMAGEIO.value:
+            frames = np.stack(
+                [dataset[variable][x] for x in range(len(dataset[time_dim]))], axis=0
+            )
+            self._to_gif(frames, out_filename)
+        else:
+            raise ValueError(
+                f"GIF writer method must be one of the following: {GifWriterType.IMAGEIO.value} or {GifWriterType.PLOT.value}"
             )
 
-    def write_jpg_gif(self, image_names: list, out_filename: str):
+    def _to_gif(self, frames: np.stack, out_filename: str, **kwargs):
         """Writes a list of images to a GIF.
-
+        :param frames: imput stacked numpy arrays
         :param out_filename: GIF filename to write out to.
         """
-        print(image_names)
-        frames = np.stack([iio.imread(image) for image in image_names], axis=0)
-        print(frames)
         iio.imwrite(
-            out_filename, frames, extension=".gif", loop=0, duration=100, background=1
+            out_filename, frames, extension=".gif", loop=0, duration=100, background=1, **kwargs
         )
